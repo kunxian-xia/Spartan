@@ -222,9 +222,10 @@ impl R1CSProof {
       random_tape,
     );
     // kunxian
-    assert_eq!(claims_phase1[0], poly_Az[0]);
-    assert_eq!(claims_phase1[1], poly_Bz[0]);
-    assert_eq!(claims_phase1[2], poly_Cz[0]);
+    assert_eq!(claims_phase1[0], poly_tau[0]);
+    assert_eq!(claims_phase1[1], poly_Az[0]);
+    assert_eq!(claims_phase1[2], poly_Bz[0]);
+    assert_eq!(claims_phase1[3], poly_Cz[0]);
 
     // eq(tau, rx)
     assert_eq!(poly_tau.len(), 1);

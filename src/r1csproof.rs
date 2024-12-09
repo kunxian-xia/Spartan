@@ -20,19 +20,32 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct R1CSProof {
-  comm_vars: PolyCommitment,
+  comm_vars: PolyCommitment, // commit to vars(ry[1..])
+  // phase 1 zk sumcheck to reduce R1CS sat to the evaluations of
+  //  Az(rx), Bz(rx), Cz(rx), eq(tau, rx)
   sc_proof_phase1: ZKSumcheckInstanceProof,
   claims_phase2: (
+    // Ca, Cb, Cab, Cc are commitments to
+    // Az(rx), Bz(rx), Az(rx)*Bz(rx), Cz(rx)
     CompressedGroup,
     CompressedGroup,
     CompressedGroup,
     CompressedGroup,
   ),
+  // Cc is well-formed, (Cab, Ca, Cb) satisfy the product relation
   pok_claims_phase2: (KnowledgeProof, ProductProof),
+  // proof that commitment of phase1 zk sumcheck's last eval opens to
+  //  eq(tau,rx) * (Az(rx)*Bz(rx) - Cz(rx))
   proof_eq_sc_phase1: EqualityProof,
+  // phase 2 zk sumcheck
   sc_proof_phase2: ZKSumcheckInstanceProof,
+  // MLE commitment of vars
   comm_vars_at_ry: CompressedGroup,
+  // evaluation proof that vars(ry[1..]) = e
   proof_eval_vars_at_ry: PolyEvalProof,
+  // proof that commitment of phase2 zk sumcheck's last eval opens to
+  //  (ra*A(rx,ry)+rb*B(rx,ry)+rc*C(rx,ry))*z(ry)
+  // where z(ry) = vars(ry[1..]) * eq(ry[0],0) + inputs(ry[1..])*eq(ry[0], 1)
   proof_eq_sc_phase2: EqualityProof,
 }
 
@@ -72,6 +85,9 @@ impl R1CSGens {
 }
 
 impl R1CSProof {
+  // phase 1 sumcheck: 0 = \sum_x eq(tau, x)*(Az(x)*Bz(x) - Cz(x))
+  //
+  // The degree of this sumcheck is 3 and the number of rounds is inst.get_num_cons()
   fn prove_phase_one(
     num_rounds: usize,
     evals_tau: &mut DensePolynomial,
@@ -107,12 +123,15 @@ impl R1CSProof {
     (sc_proof_phase_one, r, claims, blind_claim_postsc)
   }
 
+  // kunxian:
+  // phase2 sumcheck: ra*Az(rx)+rb*Bz(rx)+rc*Cz(rx) = \sum_y [ra*A(rx,y) + rb*B(rx,y) + rc*C(rx,y)] * z(y)
+  // This sumcheck has degree 2 and the number of rounds is inst.get_num_vars()
   fn prove_phase_two(
     num_rounds: usize,
-    claim: &Scalar,
+    claim: &Scalar, // kunxian: ra*Az(rx)+rb*Bz(rx)+rc*Cz(rx)
     blind_claim: &Scalar,
-    evals_z: &mut DensePolynomial,
-    evals_ABC: &mut DensePolynomial,
+    evals_z: &mut DensePolynomial, // kunxian: z(y)
+    evals_ABC: &mut DensePolynomial, // kunxian: evals_ABC = ra*A(rx,y) + rb*B(rx,y) + rc*C(rx,y)
     gens: &R1CSSumcheckGens,
     transcript: &mut Transcript,
     random_tape: &mut RandomTape,
@@ -150,6 +169,7 @@ impl R1CSProof {
     let timer_prove = Timer::new("R1CSProof::prove");
     transcript.append_protocol_name(R1CSProof::protocol_name());
 
+    assert!(vars.len().is_power_of_two());
     // we currently require the number of |inputs| + 1 to be at most number of vars
     assert!(input.len() < vars.len());
 
@@ -185,12 +205,13 @@ impl R1CSProof {
     // derive the verifier's challenge tau
     let (num_rounds_x, num_rounds_y) = (inst.get_num_cons().log_2(), z.len().log_2());
     let tau = transcript.challenge_vector(b"challenge_tau", num_rounds_x);
-    // compute the initial evaluation table for R(\tau, x)
+    // compute the initial evaluation table for eq(\tau, x)
     let mut poly_tau = DensePolynomial::new(EqPolynomial::new(tau).evals());
+    // kunxian: get the evaluation table for Az(x), Bz(x), Cz(x)
     let (mut poly_Az, mut poly_Bz, mut poly_Cz) =
       inst.multiply_vec(inst.get_num_cons(), z.len(), &z);
 
-    let (sc_proof_phase1, rx, _claims_phase1, blind_claim_postsc1) = R1CSProof::prove_phase_one(
+    let (sc_proof_phase1, rx, claims_phase1, blind_claim_postsc1) = R1CSProof::prove_phase_one(
       num_rounds_x,
       &mut poly_tau,
       &mut poly_Az,
@@ -200,12 +221,22 @@ impl R1CSProof {
       transcript,
       random_tape,
     );
+    // kunxian
+    assert_eq!(claims_phase1[0], poly_tau[0]);
+    assert_eq!(claims_phase1[1], poly_Az[0]);
+    assert_eq!(claims_phase1[2], poly_Bz[0]);
+    assert_eq!(claims_phase1[3], poly_Cz[0]);
+
+    // eq(tau, rx)
     assert_eq!(poly_tau.len(), 1);
+    // Az(rx), Bz(rx), Cz(rx)
     assert_eq!(poly_Az.len(), 1);
     assert_eq!(poly_Bz.len(), 1);
     assert_eq!(poly_Cz.len(), 1);
     timer_sc_proof_phase1.stop();
 
+    // kunxian: in order to have zk property, we need to hide
+    //   Az(rx), Bz(rx), Cz(rx) using a perfect hiding commitment scheme like pedersen commitment
     let (tau_claim, Az_claim, Bz_claim, Cz_claim) =
       (&poly_tau[0], &poly_Az[0], &poly_Bz[0], &poly_Cz[0]);
     let (Az_blind, Bz_blind, Cz_blind, prod_Az_Bz_blind) = (
@@ -215,6 +246,7 @@ impl R1CSProof {
       random_tape.random_scalar(b"prod_Az_Bz_blind"),
     );
 
+    // kunxian: proof that comm_Cz_claim is well-formed
     let (pok_Cz_claim, comm_Cz_claim) = {
       KnowledgeProof::prove(
         &gens.gens_sc.gens_1,
@@ -225,6 +257,9 @@ impl R1CSProof {
       )
     };
 
+    // kunxian: proof that
+    //   1. comm_Az_claim and comm_Bz_claim are well-formed
+    //   2. comm_Az_prod_Bz_claim is the well-formed
     let (proof_prod, comm_Az_claim, comm_Bz_claim, comm_prod_Az_Bz_claims) = {
       let prod = Az_claim * Bz_claim;
       ProductProof::prove(
@@ -248,6 +283,20 @@ impl R1CSProof {
     // prove the final step of sum-check #1
     let taus_bound_rx = tau_claim;
     let blind_expected_claim_postsc1 = taus_bound_rx * (prod_Az_Bz_blind - Cz_blind);
+
+    // kunxian:
+    // eq(tau,rx)* [commit(Az*Bz, blind_prod) - commit(Cz, blind_c)]
+    // = commit(eq(tau, rx)*(Az*Bz-Cz), eq(tau,rx)*(blind_prod - blind_c))
+
+    // kunxian: phase 1 sumcheck reduce the R1CS satisfiability problem to the validity of
+    //    evaluations of Az(rx), Bz(rx), Cz(rx)
+    //  and eq(tau, rx) (this can be evaluated by the verifier).
+
+    // kunxian: the last expected sum in phase 1 sumcheck is eq(tau,rx) * (Az(rx)*Bz(rx) - Cz(rx))
+    //   However,
+    //    1. Az(rx) is hidden in comm_Az_claim;
+    //    2. Bz(rx) is hidden in comm_Bz_claim;
+    //    3. Cz(rx) is hidden in comm_Cz_claim;
     let claim_post_phase1 = (Az_claim * Bz_claim - Cz_claim) * taus_bound_rx;
     let (proof_eq_sc_phase1, _C1, _C2) = EqualityProof::prove(
       &gens.gens_sc.gens_1,
@@ -264,6 +313,8 @@ impl R1CSProof {
     let r_A = transcript.challenge_scalar(b"challenege_Az");
     let r_B = transcript.challenge_scalar(b"challenege_Bz");
     let r_C = transcript.challenge_scalar(b"challenege_Cz");
+    // kunxian: phase2's expected sum is
+    //    ra*Az(rx) + rb*Bz(rx) + rc*Cz(rx)
     let claim_phase2 = r_A * Az_claim + r_B * Bz_claim + r_C * Cz_claim;
     let blind_claim_phase2 = r_A * Az_blind + r_B * Bz_blind + r_C * Cz_blind;
 
@@ -281,6 +332,9 @@ impl R1CSProof {
     };
 
     // another instance of the sum-check protocol
+    // kunxian: 2nd sumcheck is ra*Az(rx) + rb*Bz(rx) + rc*Cz(rx) = \sum_y [ra*A(rx,y) + rb*B(rx,y) + rc*C(rx,y)] * z(y)
+    //    1. its degree is 2
+    //    2. it reduces to the validity of evaluations of A(rx,ry), B(rx,ry), C(rx,ry) and z(ry)
     let (sc_proof_phase2, ry, claims_phase2, blind_claim_postsc2) = R1CSProof::prove_phase_two(
       num_rounds_y,
       &claim_phase2,
@@ -294,6 +348,8 @@ impl R1CSProof {
     timer_sc_proof_phase2.stop();
 
     let timer_polyeval = Timer::new("polyeval");
+    // kunxian: z = [vars, 0...0, 1, inputs, 0, ..., 0]
+    //     eval_vars_at_ry = [vars, 0...0](ry[1..])
     let eval_vars_at_ry = poly_vars.evaluate(&ry[1..]);
     let blind_eval = random_tape.random_scalar(b"blind_eval");
     let (proof_eval_vars_at_ry, comm_vars_at_ry) = PolyEvalProof::prove(
@@ -311,7 +367,13 @@ impl R1CSProof {
     // prove the final step of sum-check #2
     let blind_eval_Z_at_ry = (Scalar::one() - ry[0]) * blind_eval;
     let blind_expected_claim_postsc2 = claims_phase2[1] * blind_eval_Z_at_ry;
+    // kunxian:
+    //   claims_phase2[0] = z(ry)
+    //   claims_phase2[1] = ra*A(rx,ry) + rb*B(rx,ry) + rc*C(rx,ry)
     let claim_post_phase2 = claims_phase2[0] * claims_phase2[1];
+    // kunxian: proof that C1 and C2 commit to same value
+    //  C1 = claims_phase2[1] * commit(z(ry))
+    //  C2 = sc_proof_phase2.evals[n-1]
     let (proof_eq_sc_phase2, _C1, _C2) = EqualityProof::prove(
       &gens.gens_pc.gens.gens_1,
       transcript,

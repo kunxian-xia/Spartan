@@ -39,6 +39,8 @@ impl SumcheckInstanceProof {
     for i in 0..self.compressed_polys.len() {
       let poly = self.compressed_polys[i].decompress(&e);
 
+      // kunxian: In each round, the prover sends a uni-variate polynomial (in compressed form) to the verifier.
+
       // verify degree bound
       assert_eq!(poly.degree(), degree_bound);
 
@@ -97,9 +99,28 @@ impl ZKSumcheckInstanceProof {
     assert_eq!(self.comm_polys.len(), num_rounds);
     assert_eq!(self.comm_evals.len(), num_rounds);
 
+    // in zk sumcheck protocol, the claimed sum is hidden in a perfect hiding commitment
+
     let mut r: Vec<Scalar> = Vec::new();
     for i in 0..self.comm_polys.len() {
       let comm_poly = &self.comm_polys[i];
+
+      // kunxian: in each round, the verifier only knows
+      //   1. c_es = commit(expected_sum)
+      //   2. c_p = commit(p(X)) to the uni-variate polynomial
+      //   3. c_r = commit(p(r)) for next round (which is the expected sum for next round).
+      //
+      // The verifier needs to check that
+      // 1. decommit(c_es) = decommit(c_p)(0) + decommit(c_p)(1)
+      //      p(0) = a0
+      //      p(1) = a0 + ... + a_{degree_bound}
+      // 2. decommit(c_r) = decommit(c_p)(r)
+      //      p(r) = a0 + a1*r + ... + a_{degree_bound}*r^n
+      //
+      // For 1
+      //  expected_sum = <a, [2,1,1,...,1]>
+      // For 2
+      //  p(r) = <a, [1, r, r^2, ...]>
 
       // append the prover's polynomial to the transcript
       comm_poly.append_to_transcript(b"comm_poly", transcript);
@@ -615,6 +636,7 @@ impl ZKSumcheckInstanceProof {
     let mut comm_evals: Vec<CompressedGroup> = Vec::new();
     let mut proofs: Vec<DotProductProof> = Vec::new();
 
+    // kunxian: DensePolynomial/MLE is stored using big-endian layout: p[i1,...,in] = p.Z[int_from_be(i1...in)]
     for j in 0..num_rounds {
       let (poly, comm_poly) = {
         let mut eval_point_0 = Scalar::zero();
@@ -658,9 +680,12 @@ impl ZKSumcheckInstanceProof {
           eval_point_3,
         ];
         let poly = UniPoly::from_evals(&evals);
+        // kunxian: commit to a uni-variate polynomial of degree 3
         let comm_poly = poly.commit(gens_n, &blinds_poly[j]).compress();
         (poly, comm_poly)
       };
+
+      // kunxian: in each round of the zk sumcheck protocol, prover sends a commitment to the uni-variate poly to verifier
 
       // append the prover's message to the transcript
       comm_poly.append_to_transcript(b"comm_poly", transcript);

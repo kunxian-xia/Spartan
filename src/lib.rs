@@ -128,6 +128,7 @@ impl Instance {
     C: &[(usize, usize, [u8; 32])],
   ) -> Result<Instance, R1CSError> {
     let (num_vars_padded, num_cons_padded) = {
+      // pad vars to have length equal to 2^n
       let num_vars_padded = {
         let mut num_vars_padded = num_vars;
 
@@ -178,6 +179,9 @@ impl Instance {
             // if col >= num_vars, it means that it is referencing a 1 or input in the satisfying
             // assignment
             if col >= num_vars {
+              // kunxian: convert the original matrices in R1CS
+              //     as the satisfying assignment in spartan has the new form
+              //     z = [vars, 0...0, 1, inputs, 0...0]
               mat.push((row, col + num_vars_padded - num_vars, val.unwrap()));
             } else {
               mat.push((row, col, val.unwrap()));

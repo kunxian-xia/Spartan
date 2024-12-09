@@ -222,6 +222,14 @@ impl AddrTimestamps {
       assert_eq!(item.len(), num_ops);
     }
 
+    // kunxian: share same init table for multiple matrices
+    // I \cup R_A \cup R_B \cup R_C = W_A \cup W_B \cup W_C \cup F
+    // H(R_A) = \prod_{(a,v) \in A} h(a,v,t) - r_multiset_check
+    // H(R_B) = \prod_{(a,v) \in B} h(a,v,t) - r_multiset_check
+    // H(R_C) = \prod_{(a,v) \in C} h(a,v,t) - r_multiset_check
+    // H(W_A) = \prod_{(a,v) \in A} h(a,v,t+1) - r_multiset_check
+    // H(W_B) = \prod_{(a,v) \in B} h(a,v,t+1) - r_multiset_check
+    // H(W_C) = \prod_{(a,v) \in C} h(a,v,t+1) - r_multiset_check
     let mut audit_ts = vec![0usize; num_cells];
     let mut ops_addr_vec: Vec<DensePolynomial> = Vec::new();
     let mut read_ts_vec: Vec<DensePolynomial> = Vec::new();
@@ -275,7 +283,14 @@ pub struct MultiSparseMatPolynomialAsDense {
   val: Vec<DensePolynomial>,
   row: AddrTimestamps,
   col: AddrTimestamps,
+  // kunxian: (row_addr, row_read_ts, col_addr, col_read_ts, M) x 3 combined together
+  //   1. each of these MLEs has t variables where 2^t is the maximal number of non-zero entries in A,B,C
   comb_ops: DensePolynomial,
+  // init set: { (i, eq(rx,i), 0) }
+  // final/audit set: { (i, eq(rx,i), final_ts) }
+  // note that the evaluation of
+  // 1. identity ml-poly can be computed easily by verifier: id(r) = \sum 2^(n-i)*ri
+  // 2. eq(rx,i) = \prod eq(rx[j], i.be_bits[j]) can also be computed easily by verifier: eq(rx,i)(r) = eq(rx,r)
   comb_mem: DensePolynomial,
 }
 
@@ -391,6 +406,8 @@ impl SparseMatPolynomial {
 
     let any_poly = &sparse_polys[0];
 
+    // init rom table for row has 2^num_vars_x slots
+    // init rom table for col has 2^num_vars_y slots
     let num_mem_cells = if any_poly.num_vars_x > any_poly.num_vars_y {
       any_poly.num_vars_x.pow2()
     } else {
@@ -400,15 +417,23 @@ impl SparseMatPolynomial {
     let row = AddrTimestamps::new(num_mem_cells, N, ops_row_vec);
     let col = AddrTimestamps::new(num_mem_cells, N, ops_col_vec);
 
+    // kunxian: how does merge multiple MLEs work?
+    //  M[i1..ik,j1..jn] = pi[j1...jn] where i = i1+2*i2+2^2*i3+..
+    // M(r1..rk,s1..sn) = \sum eq([r1..rk],[i1..ik]) * eq([s1..sn,j1..jn]) * pi[j1..jn]
+    //                  = \sum eq([r1..rk],[i1..ik]) * pi(s1,..,sn)
+    // If there exists 2^k evaluations [ ei ], and M(r1..rk, s1..sn) = \sum eq([r1..rk],[i1..ik]) * ei,
+    // does it imply that pi(s1,..,sn) = ei?
+
     // combine polynomials into a single polynomial for commitment purposes
+    // kunxian: merge 3*5 MLEs with t variables into one bigger MLE with (t+4) variables
     let comb_ops = DensePolynomial::merge(
       row
-        .ops_addr
+        .ops_addr  // row_addr
         .iter()
-        .chain(row.read_ts.iter())
-        .chain(col.ops_addr.iter())
-        .chain(col.read_ts.iter())
-        .chain(val_vec.iter()),
+        .chain(row.read_ts.iter()) // row_read_ts
+        .chain(col.ops_addr.iter()) // col_addr
+        .chain(col.read_ts.iter()) // col_read_ts
+        .chain(val_vec.iter()), // M[i]
     );
     let mut comb_mem = row.audit_ts.clone();
     comb_mem.extend(&col.audit_ts);
@@ -468,6 +493,7 @@ impl SparseMatPolynomial {
   ) -> Vec<Scalar> {
     assert_eq!(rx.len(), num_rows);
 
+    // kunxian: for each y, M(rx, y) = \sum_x eq(rx, x)*M(x,y)
     self.M.iter().fold(
       vec![Scalar::zero(); num_cols],
       |mut M_evals, SparseMatEntry { row, col, val }| {
@@ -511,9 +537,12 @@ impl MultiSparseMatPolynomialAsDense {
 
 #[derive(Debug)]
 struct ProductLayer {
+  // kunxian: computes \prod_i h(i, eq(rx,i), 0) - r_multiset_check using complete binary tree
   init: ProductCircuit,
+  // kunxian: for each matrix M \in {A, B, C}, computes \prod_j h(row_j, eq(rx, row_j), read_ts) - r_multiset_check
   read_vec: Vec<ProductCircuit>,
   write_vec: Vec<ProductCircuit>,
+  // kunxian: computes \prod_i h(i, eq(rx,i), audit_ts) - r_multiset_check
   audit: ProductCircuit,
 }
 
@@ -637,6 +666,7 @@ impl Layers {
     let hashed_read_set: Scalar = hashed_reads * prod_audit.evaluate();
 
     //assert_eq!(hashed_read_set, hashed_write_set);
+    // kunxian: offline memory checking - I U R = W U F
     debug_assert_eq!(hashed_read_set, hashed_write_set);
 
     Layers {
@@ -680,6 +710,7 @@ struct HashLayerProof {
   eval_col: (Vec<Scalar>, Vec<Scalar>, Scalar),
   eval_val: Vec<Scalar>,
   eval_derefs: (Vec<Scalar>, Vec<Scalar>),
+  // row, row_read_ts, row_final_ts
   proof_ops: PolyEvalProof,
   proof_mem: PolyEvalProof,
   proof_derefs: DerefsEvalProof,
@@ -1034,7 +1065,7 @@ impl ProductLayerProof {
     col_prod_layer: &mut ProductLayer,
     dense: &MultiSparseMatPolynomialAsDense,
     derefs: &Derefs,
-    eval: &[Scalar],
+    eval: &[Scalar], // evaluations of A(rx,ry), B(rx,ry), C(rx,ry)
     transcript: &mut Transcript,
   ) -> (Self, Vec<Scalar>, Vec<Scalar>) {
     transcript.append_protocol_name(ProductLayerProof::protocol_name());
@@ -1095,6 +1126,10 @@ impl ProductLayerProof {
       let right = derefs.col_ops_val[i].clone();
       let weights = dense.val[i].clone();
 
+      // kunxian: the last layer's sumcheck in product tree has t-1 variables.
+      //  however, the sumcheck for evaluation of M(rx,ry) where M \in {A, B, C} has t variables.
+      //  if we want to batch them together, then we need to split it into two parts.
+
       // build two dot product circuits to prove evaluation of sparse polynomial
       let mut dotp_circuit = DotProductCircuit::new(left, right, weights);
       let (dotp_circuit_left, dotp_circuit_right) = dotp_circuit.split();
@@ -1153,6 +1188,8 @@ impl ProductLayerProof {
       (vec_A, vec_B, vec_C)
     };
 
+    // kunxian: check split works
+    assert_eq!(dotp_left_A[0].evaluate() + dotp_right_A[0].evaluate(), eval[0]);
     let (proof_ops, rand_ops) = ProductCircuitEvalProofBatched::prove(
       &mut [
         &mut row_read_A[0],

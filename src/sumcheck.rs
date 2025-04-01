@@ -606,6 +606,7 @@ impl ZKSumcheckInstanceProof {
     )
   }
 
+  // zk sumcheck protocol involving 4 MLEs
   pub fn prove_cubic_with_additive_term<F>(
     claim: &Scalar,
     blind_claim: &Scalar,
@@ -636,17 +637,49 @@ impl ZKSumcheckInstanceProof {
     let mut comm_evals: Vec<CompressedGroup> = Vec::new();
     let mut proofs: Vec<DotProductProof> = Vec::new();
 
-    // kunxian: DensePolynomial/MLE is stored using big-endian layout: p[i1,...,in] = p.Z[int_from_be(i1...in)]
+    // kunxian: DensePolynomial/MLE is stored using little-endian layout: p[i1,...,in] = p.Z[int_from_le(i1...in)]
     for j in 0..num_rounds {
       let (poly, comm_poly) = {
         let mut eval_point_0 = Scalar::zero();
         let mut eval_point_2 = Scalar::zero();
         let mut eval_point_3 = Scalar::zero();
 
+        // sumcheck protocol
+        // at round j, computes a univariate polynomial 
+        //    H_i(x) = \sum_b A(b, x, r) * (B(b, x, r)*C(b, x, r) - D(b, x, r))
+        // where x.len() = 1, r.len() = j, b.len() = n - j - 1
+        // 
+        // sends < H_i(0), H_i(2), H_i(3) > to verifier
+        //
+        // receives a random challenge r_x from verifier
+        // then for each M(b, x, r) computes the evaluations M(b, r_x, r) over boolean hypercube.
+        //
+        // the next round's expected sum becomes H_i(r_{n-i})
+
+
+        // zk sumcheck protocol
+        // at round 0, the expected sum is hidden to the verifier, the verifier only knows a hiding commitment to it.
+        //
+        // at round j, the prover cannot send H_i(X) directly to verifier, but instead sends a commitment to H_i(X).
+        // 
+        // in order to allow the verifier to check H_i(0) + H_i(1) = s_i only given 
+        //     c_H = commit(H_i(X), blind_poly_i) = msm([h0, h1, h2, h3, blind_poly_i], G)
+        //     c_s_i = commit(s_i, blind_i) = msm([s_i, blind_i], G)
+        //
+        //  argument of knowledge of [h0, h1, h2, h3, blind_poly_i], [s_i, blind_i], [s_{i+1}, blind_{i+1}] s.t.
+        //  1. dotproduct([h0, h1, h2, h3, blind_poly_i], G) = c_H
+        //  2. dotproduct([s_i, blind_i], G') = c_s_i
+        //  3. <[h0, h1, h2, h3], [2, 1, 1, 1]> = s_i
+        //  4. <[h0, h1, h2, h3], [1, r, r^2, r^3]> = s_{i+1}
+
         let len = poly_A.len() / 2;
         for i in 0..len {
           // eval 0: bound_func is A(low)
           eval_point_0 += comb_func(&poly_A[i], &poly_B[i], &poly_C[i], &poly_D[i]);
+          
+          // note that M(b, x, r) = eq(x, 0)*M(b, 0, r) + eq(x, 1)*M(b, 1, r)
+          //                      = (1-x)*M(b, 0, r) + x*M(b, 1, r)
+          //                      = M(b, 0, r) + x*(M(b, 1, r) - M(b, 0, r))
 
           // eval 2: bound_func is -A(low) + 2*A(high)
           let poly_A_bound_point = poly_A[len + i] + poly_A[len + i] - poly_A[i];

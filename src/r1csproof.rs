@@ -208,6 +208,10 @@ impl R1CSProof {
     // compute the initial evaluation table for eq(\tau, x)
     let mut poly_tau = DensePolynomial::new(EqPolynomial::new(tau).evals());
     // kunxian: get the evaluation table for Az(x), Bz(x), Cz(x)
+    // Az(x) = \sum_y A(x, y)*z(y)
+    // Bz(x) = \sum_y B(x, y)*z(y)
+    // Cz(x) = \sum_y C(x, y)*z(y)
+    // note that M(x, y) is encoded as a multilinear polynomial with 2n variables
     let (mut poly_Az, mut poly_Bz, mut poly_Cz) =
       inst.multiply_vec(inst.get_num_cons(), z.len(), &z);
 
